@@ -79,7 +79,6 @@ This project demonstrates real-world **multithreading and concurrency** concepts
              │     Database (H2)     │
              │ task_id | status | ...│
              └───────────────────────┘
-
 ```
 
 ---
@@ -172,27 +171,79 @@ com.thamizharasan.asynctaskorchestrator
 
 * Client sends:
 
-  ```json
-  POST /api/tasks
-  {
-    "taskType": "GENERATE_REPORT",
-    "payload": { "records": 5000 }
-  }
-  ```
+```json
+POST /api/tasks
+{
+  "taskType": "GENERATE_REPORT",
+  "payload": { "records": 5000 }
+}
+```
+
 * Response:
 
-  ```json
-  {
-    "taskId": "c3f1b6d9-9e7e-4b1b-a76a-5db6a54b1a2d",
-    "status": "SUBMITTED"
-  }
-  ```
+```json
+{
+  "taskId": "c3f1b6d9-9e7e-4b1b-a76a-5db6a54b1a2d",
+  "status": "SUBMITTED"
+}
+```
+
 * Task runs in background.
 * Client polls `/api/tasks/{id}` to track status.
 
 ---
 
-## 🧩 11. Future Enhancements
+## 🧩 11. Sample Task Execution Flow (Parallel Processing Example)
+
+### ⚙️ Thread Pool Setup
+
+The service uses a **ThreadPoolExecutor** (or Spring’s `TaskExecutor`) to run multiple tasks in parallel.
+Example configuration:
+
+```
+corePoolSize = 10
+maxPoolSize = 10
+```
+
+* Up to **10 tasks** run **concurrently**.
+* Additional tasks are queued until threads become available.
+
+### 🧠 Example Scenario
+
+Assume **15 tasks** are submitted via `POST /api/tasks`.
+
+| Time    | Event                    | Explanation                                 |
+| ------- | ------------------------ | ------------------------------------------- |
+| 00s     | All 15 tasks submitted   | Stored in DB with status `PENDING`          |
+| 00s–01s | First 10 tasks start     | Running in 10 available threads             |
+| 02s     | 3 tasks complete         | 3 waiting tasks start automatically         |
+| 05s–06s | Remaining tasks complete | Each task updates status and progress in DB |
+
+Clients can poll `/api/tasks/{taskId}` at any time to see progress, e.g.:
+
+```json
+{
+  "taskId": "abc-123",
+  "status": "RUNNING",
+  "progress": 50,
+  "resultMessage": "Report generation in progress..."
+}
+```
+
+Completed task:
+
+```json
+{
+  "taskId": "abc-123",
+  "status": "COMPLETED",
+  "progress": 100,
+  "resultMessage": "Report generated successfully"
+}
+```
+
+---
+
+## 🧩 12. Future Enhancements
 
 * Add **priority queue** (run high-priority tasks first).
 * Integrate **Kafka** for distributed execution.
@@ -202,10 +253,10 @@ com.thamizharasan.asynctaskorchestrator
 
 ---
 
-## 📈 12. Expected Learning Outcomes
+## 📈 13. Expected Learning Outcomes
 
-* Mastery of **Java concurrency** within a Spring Boot ecosystem.
+* Mastery of **Java concurrency** within Spring Boot.
 * Hands-on experience designing **thread-safe systems**.
-* Understanding of **real-world async workflows** (used in job schedulers, report generators, background processors).
-* Strong **portfolio project** for resume/interviews demonstrating practical backend engineering depth.
+* Understanding **real-world async workflows**.
+* Strong **portfolio project** for resume/interviews.
 
