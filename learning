@@ -1,0 +1,124 @@
+FX Rate Design doc
+
+1. Purpose:
+The objective is to fetch daily FX rates from the TIP API and compute the required monthly FX averages for partners, storing results in the table
+m_lfs.lfs_ref_forex_monthly_avg_rate.
+The logic must support:
+• Standard partners (monthly average or N month rolling average)
+• AMEX Canada (special N month, last day based averaging)
+This will run once per month or daily after 10pm as we needed to create 3-4 approaches. So the leads or product need is to develop this without a service, so this has not to be run every time like a microservice does whereas it would be running daily once or monthly once.
+
+2. TIP API Interface
+Request Format
+{
+"inputCurrencyISOCode": "INR",
+"outputCurrencyISOCode": "USD",
+"date": "2026-02-13"
+}
+
+Response Format
+{
+"result": {
+"outputCurrencyISOCode": "USD",
+"outputCurrencyExchangeRate": 11,
+"outputCurrencyDecimalPoint": 3
+},
+"request": {
+"inputCurrencyISOCode": "INR",
+"outputCurrencyISOCode": "USD",
+"date": "2026-02-13"
+}
+}
+
+FX Daily Behavior
+1. TIP service returns day specific FX rate based on the requested date. 
+2. Weekend and holiday dates (e.g., Fri 20, Sat 21, Sun 22) return the same FX rate because FX market is closed; TIP returns the last available business-day rate. 
+3. If a requested past date exceeds 2 years, TIP returns an error. 
+If TIP has no rate for a specific day, system must decide: 
+• Skip the day
+• Use previous business day rate
+• Or treat as missing (TBD)
+
+
+Partner Table - m_lfs.lfs_dim_partner – this table is used to fetch the currency codes and other details over here.
+Primary Key: partner_cd
+Column Type Example values
+partner_cd varchar(5) BILT
+partner_desc varchar(50) Bilt Technologies Inc.
+partner_type_cd varchar(3) RET
+invoice_iso_currency_cd varchar(3) USD
+partner_additional_dtls_json jsonb {
+"segment_cd": "COB",
+"fx_currency_cd": "MXN",
+"fx_avg_months_num": "2",
+"curr_month_in_fx_avg": "N",
+"fx_rate_service_type": "Automated"
+}
+lfs_aud_detail_json jsonb { "current": {...}, "history": [...] }
+
+Target DB Table – m_lfs.lfs_ref_forex_monthly_avg_rate
+Column Type Example
+base_currency_code char(3) USD
+quote_currency_code char(3) YEN
+monthly_avg_quote_rate numeric(11,4) 148.99
+year smallint 2025
+month smallint 9
+lfs_aud_detail_json jsonb { "current": {...}, "history": [...] }
+
+
+Monthly FX Requirements
+7.1 Standard Partner Behavior
+• Compute monthly average from daily FX values for the given month
+OR
+• Compute rolling N month average (e.g., average of Jan + Feb if running in March).
+7.2 AMEX Canada Behavior
+• Use N months
+• For each of the previous N calendar months: 
+o Take only the last business day FX rate
+• Average these N final-day values
+• Example:
+If N=2 and today = March → use: 
+o Feb last-day FX
+o Jan last-day FX
+→ average of those 2 values
+
+Calculation: 
+Day exchangeRate (big number) decimalPoint realRate
+Day 1 1425923… 33 1425.923
+Day 2 1420000… 33 1420
+Day 3 1431000… 33 1431
+• 
+• 1425.9232 +1420.0000 +1431.0000 = 4276.9232
+• 4276.9232 / 3 = 1425.641066...
+• realRate = outputCurrencyExchangeRate ÷ (10 ^ outputCurrencyDecimalPoint) monthlyAverage = (rate1 + rate2 + rate3 + ... ) ÷ numberOfDays
+
+
+7.3 Date Range Constraintsg
+• TIP only supports last 2 years.
+• Contract ranges (e.g., 2023–2029) may demand FX for months TIP cannot serve → fallback or manual solution required.
+
+Required Inputs for Monthly Run
+1. Partner list where fx_rate_service_type = Automated
+2. Base/quote currency pairs per partner
+3. Partner’s FX configuration: 
+o fx_avg_months_num
+o Average method (standard vs AMEX)
+4. For each month/day in scope: 
+o TIP daily rate (calculated using formula)
+
+Required Outputs
+For each base/quote pair:
+• Computed monthly average FX
+• Stored row in lfs_ref_forex_monthly_avg_rate with: 
+o Rate
+o Year
+o Month
+o Audit JSON including calculation method, dates included/excluded, TZ, version, etc.
+
+Known Constraints
+• TIP API fails for dates >2 years in past. – better we should process less than that range only.
+• TIP returns same value for weekends. – so we don’t needed to care of it and use the values and average for month.
+• FX daily boundary must be treated in ET. – so we will be using the EST time zone as the service also be running on us so no needed to care of it.
+• Cannot run daily ingestion (for now); monthly only. – now we have to give approaches with day & month and then lets see what product decides to go with.
+• Monthly jobs must wait until final day’s FX is considered stable. – yes since it’s a monthly average it has to be run monthly and if day wise we have to handle in such a way. So lets give approaches and lets modify the design after the confirmation of approach.
+ 
