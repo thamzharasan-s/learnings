@@ -1,3 +1,124 @@
+Multi-Threading Approaches for Pre-Processor Service – POC
+This document outlines multi-threading approaches for scaling and optimizing the existing spring batch pre-processor service. Each approach includes a description, benefits, and drawbacks.
+
+Approach 1: Processing with Spring batch tables
+Description:
+This is the existing logic, using the Spring batch partitioner to split the data fetched and process. At the end, the last processed id gets stored in the spring batch table, then it is used for the next run.
+Benefits:
+• If there are a failure or the pod restarts, it will continue from where it gets stopped.
+Drawbacks:
+• Very complex logic and required additional checks on multiple tables.
+• When the data increases, maintaining and validating the last processed id is complex.
+• There could be a possibility of missing some of the records if the sequence was changed.
+
+Approach 2: In-Memory Cache Based Processing
+Description:
+Using the Spring batch partitioner split the unprocessed IDs into multiple partitions and process the data. Once the Processing is done store the last processed id in the local in-memory of the application and use the same last processed id for the next run.
+Benefits:
+• No Separate Cache is needed.
+• No use of Spring batch table to store the last processed id.
+Drawbacks:
+• The last processed id could be lost on restart of the pod, may restart the process from the beginning.
+• May lead to duplication of the records.
+• Risk of memory pressure for large datasets.
+
+
+
+Approach 3: Spring batch Partitioning with Redis cache
+Description:
+Use Spring batch partitioner to split the list of unprocessed IDs into multiple partitions. After processing the certain batch, store the last processed id and the failed entries id as list in the Redis key. Then we can use these keys for the next run.
+
+Benefits:
+• Reduces the DB load because locking and coordination are done in Redis instead of the database.
+Drawbacks:
+• Redis availability is highly needed.
+• There could be a possibility of losing the last processed id and failure of records if Redis goes down.
+
+Approach 4: Spring batch Partitioning with Status column
+Description:
+Use Spring batch Partitioner to split the list of records with ‘N’ status into multiple ID-range partitions. Each partition is processed by a worker step parallelly and after processing, update the status to ‘Y’.
+Benefits:
+• Status column ensures no record is processed twice or duplicated.
+• If there is a failure or restart of the pod, it will continue from where it gets stopped.
+• By defaulting on the status, there won't be any change to the upstream application.
+• Strong consistency and idempotency.
+Drawbacks:
+• Increase in dB load due to status update, more dependent on database.
+
+
+
+
+
+
+Pre-Processor Service – POC Implementation
+Summary:
+The job reads transactions from the source table and processes them in parallel using a partitioned step. Each partition handles a specific ID range for multi-threaded execution. After that, a single-thread recovery step runs to reprocess any unfinished ranges left due to a crash or stop. Redis is used to track progress for each thread and to determine safe restart points for the next run.
+
+Threading & Job Flow:
+• Partition step threads: PreprocessorJobThread-* (multi-threaded via TaskExecutorPartitionHandler for parallel partitions).
+• Recovery step thread: reactor-http-nio-* (single-threaded for missed range recovery).
+• Job execution flow: 
+o partitionedPreProcessorStep → runs multiple sourceToOutputStep workers in parallel.
+o recoveryStep → scans Redis for unfinished ranges and reprocesses them sequentially.
+
+Cache Keys Used: 
+
+LAST_PROCESSED_ID_KEY – Long (eg: 10003) - last processed id of the current job
+NEXT_JOB_PROCESSING_ID_KEY Long (eg: 10004) - Next Job Processing id used for next job
+PRE_PROC_PreprocessorJobThread-* - Thread Object – Partitioned step Cache key
+PRE_PROC_reactor-http-nio-* - Thread Object – Recovery Step Cache key
+
+Thread Object Value (eg,):
+{
+"threadName": "PreprocessorJobThread-1",
+"minId": 101,
+"maxId": 245,
+"processingId": 201,
+"status": "RUNNING" // RUNNING | COMPLETED | FAILED 
+}
+
+
+Spring Batch:
+Partitioning step logic:
+1. Fetch minId → from Redis (LAST_PROCESSED_ID_KEY), else DB fallback (MAX transaction id from output & error tables).
+2. Also check unfinished partition or failure thread keys in Redis, if any status with RUNNING/FAILED, if these list of threads exist computing the minimum id using the end and processed Id and using this as minId if less than Last Processed Id.
+3. Final minId = last processed ID (cache or DB).
+4. Fetch maxId → from source table (SELECT MAX(lfs_transaction_id)); if maxId <= 0, exit.
+5. Store NEXT_JOB_PROCESSING_ID_KEY = maxId + 1 for next run baseline which will be moved to the LAST_PROCESSED_ID_KEY on job completion.
+6. Using the fetched minId and maxId, we split the range into equal partitions based on gridSize and assign each partition as start end values to a thread for multi-threaded processing.
+
+Spring Batch Job Flow:
+ItemReader:
+• Using the input parameter start & end validates does it has the start and end else returns and job ends due to no record to process.
+• If exist creates a thread based cache using the thread name, start, end and status as Running and the processing id is not set.
+o threadName, minId, maxId, status=RUNNING, processingId=null.
+• Then using the start and end, reader reads the non-exist data from source and error table using joins. 
+ItemProcessor:
+• No changes in the processor and the same logic exists.
+ItemWriter:
+• Based on the processor, it invokes the same error or source writter.
+• After each chunk: 
+o Updates the processingId in the cache object of that respective thread using the cache name in both error and output table writer.
+• After step completion: 
+o Marks thread cache status=COMPLETED using the thread name and the processingId is unchanged as of max on completion.
+On the completion of the partitioning step the recovery step gets invoked.
+Recovery step logic:
+• Discover missed work: Read Redis thread progress keys; ignore COMPLETED, compute each unfinished thread’s start as processingId + 1 (or minId as null).
+• Build recovery window: Use overall [globalStart .. globalEnd] (or merge per-thread ranges) derived from unfinished threads.
+• The same ItemReader, ItemProcessor & ItemWriter is used with a single threaded with default thread name as “reactor-http-nio-*”, created and updates the thread object in cache.
+
+Job Completion (afterJob):
+• Consolidates progress by scanning Redis thread keys: for COMPLETED threads uses maxId, otherwise uses current processingId.
+• Compares that with NEXT_JOB_PROCESSING_ID_KEY and sets LAST_PROCESSED_ID_KEY to the safe final checkpoint (baseline for next run).
+• Cleans up Redis by deleting partition and recovery thread progress keys to prevent stale RUNNING/FAILED states.
+Then the job ends and if there is any down of the pod in-between, the last processed id will be fetched using the thread objects if exists on the partition class.
+ 
+
+
+
+-================================================================
+
+
 FX Rate Design doc
 
 1. Purpose:
